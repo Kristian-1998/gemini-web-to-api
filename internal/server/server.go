@@ -32,6 +32,14 @@ func New(log *zap.Logger) *fiber.App {
 	// Swagger UI — gofiber/contrib/v3/swaggo (Fiber v3 compatible)
 	app.Get("/swagger/*", swaggo.HandlerDefault)
 
+	// Health check endpoint — used by Docker/K8s/cloud platforms
+	app.Get("/health", func(c fiber.Ctx) error {
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{
+			"status":  "ok",
+			"services": "gemini-web-to-api",
+		})
+	})
+
 	return app
 }
 

@@ -296,7 +296,22 @@ func (c *Client) startAutoRefresh() {
 			c.log.Debug("Starting scheduled cookie refresh")
 			rotateErr := c.RotateCookies()
 			if rotateErr != nil {
-				// RotateCookies failed (Google may not return a new cookie every time)
+				// Check if it's a 401/403 (cookies fully expired) — no point retrying session token
+				isCookieExpired := strings.Contains(rotateErr.Error(), "status 401") ||
+					strings.Contains(rotateErr.Error(), "status 403")
+
+				if isCookieExpired {
+					c.log.Error("Cookies have expired — please update GEMINI_1PSID and GEMINI_1PSIDTS in .env",
+						zap.Error(rotateErr),
+						zap.String("action", "Visit https://gemini.google.com → F12 → Application → Cookies"),
+					)
+					c.mu.Lock()
+					c.healthy = false
+					c.mu.Unlock()
+					continue
+				}
+
+				// RotateCookies failed but NOT due to expired cookies (Google may not return new cookie every time)
 				// Fallback: try to refresh the session token (SNlM0e/at) to keep client alive
 				c.log.Warn("Cookie rotation failed, falling back to session token refresh", zap.Error(rotateErr))
 				if sessionErr := c.refreshSessionToken(); sessionErr != nil {
