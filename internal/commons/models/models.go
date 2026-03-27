@@ -62,10 +62,10 @@ type EmbeddingsRequest struct {
 
 // EmbeddingsResponse represents embeddings response
 type EmbeddingsResponse struct {
-	Object string        `json:"object"`
-	Data   []Embedding   `json:"data"`
-	Model  string        `json:"model"`
-	Usage  Usage         `json:"usage"`
+	Object string      `json:"object"`
+	Data   []Embedding `json:"data"`
+	Model  string      `json:"model"`
+	Usage  Usage       `json:"usage"`
 }
 
 // Embedding represents a single embedding

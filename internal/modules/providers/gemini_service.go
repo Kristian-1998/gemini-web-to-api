@@ -3,6 +3,7 @@ package providers
 import (
 	"compress/gzip"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gemini-web-to-api/internal/commons/configs"
@@ -27,7 +29,7 @@ type Client struct {
 	httpClient *req.Client
 	cookies    *CookieStore
 	at         string
-	mu         sync.RWMutex // protects: at, healthy
+	mu         sync.RWMutex // protects: at, healthy, buildLabel, sessionID
 	healthy    bool
 	log        *zap.Logger
 
@@ -35,7 +37,13 @@ type Client struct {
 	refreshInterval time.Duration
 	stopRefresh     chan struct{}
 	maxRetries      int
+	debug           bool
 	cachedModels    []ModelInfo
+
+	// Extracted from init page; used for accurate request routing
+	buildLabel string // "bl" query param (e.g. boq_assistant-bard-web-server_...)
+	sessionID  string // "f.sid" query param
+	reqID      atomic.Int64
 }
 
 type CookieStore struct {
@@ -48,6 +56,44 @@ type CookieStore struct {
 const (
 	defaultRefreshIntervalMinutes = 30
 )
+
+// webModelSpec holds the internal model_id and capacity_tail needed to build
+// the x-goog-ext-525001261-jspb header that selects a specific Gemini model.
+// model_id values sourced from HanaokaYuzu/Gemini-API constants.py.
+type webModelSpec struct {
+	id           string
+	capacityTail int
+}
+
+var webModelSpecs = map[string]webModelSpec{
+	"gemini-3.0-flash":                 {"fbb127bbb056c959", 1},
+	"gemini-3.0-flash-thinking":        {"5bf011840784117a", 1},
+	"gemini-3.1-pro":                   {"9d8ca3786ebdfbea", 1},
+	"gemini-3-flash":                   {"fbb127bbb056c959", 1},
+	"gemini-3-flash-thinking":          {"5bf011840784117a", 1},
+	"gemini-3-pro":                     {"9d8ca3786ebdfbea", 1},
+	"gemini-3-flash-plus":              {"56fdd199312815e2", 4},
+	"gemini-3-flash-thinking-plus":     {"e051ce1aa80aa576", 4},
+	"gemini-3-pro-plus":                {"e6fa609c3fa255c0", 4},
+	"gemini-3-flash-advanced":          {"56fdd199312815e2", 2},
+	"gemini-3-flash-thinking-advanced": {"e051ce1aa80aa576", 2},
+	"gemini-3-pro-advanced":            {"e6fa609c3fa255c0", 2},
+}
+
+// newUpperUUID generates a random UUID v4 in uppercase, as expected by the Gemini API.
+func newUpperUUID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return strings.ToUpper(fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]))
+}
+
+// buildModelHeader constructs the x-goog-ext-525001261-jspb header value for a given model.
+func buildModelHeader(spec webModelSpec) string {
+	return fmt.Sprintf(`[1,null,null,null,"%s",null,null,0,[4],null,null,%d]`, spec.id, spec.capacityTail)
+}
 
 func NewClient(cfg *configs.Config, log *zap.Logger) *Client {
 	cookies := &CookieStore{
@@ -65,15 +111,18 @@ func NewClient(cfg *configs.Config, log *zap.Logger) *Client {
 		refreshIntervalMinutes = defaultRefreshIntervalMinutes
 	}
 
-	return &Client{
+	c := &Client{
 		httpClient:      client,
 		cookies:         cookies,
 		autoRefresh:     true,
 		refreshInterval: time.Duration(refreshIntervalMinutes) * time.Minute,
 		stopRefresh:     make(chan struct{}),
 		maxRetries:      cfg.Gemini.MaxRetries,
+		debug:           cfg.Gemini.Debug,
 		log:             log,
 	}
+	c.reqID.Store(10000)
+	return c
 }
 
 func (c *Client) Init(ctx context.Context) error {
@@ -85,7 +134,7 @@ func (c *Client) Init(ctx context.Context) error {
 	// Check if we should use cached cookies or clear cache
 	if c.cookies.Secure1PSID != "" {
 		cachedTS, err := c.LoadCachedCookies()
-		
+
 		// If config has a new PSIDTS that differs from cache, clear cache and use config
 		if configPSIDTS != "" && cachedTS != "" && configPSIDTS != cachedTS {
 			_ = c.ClearCookieCache()
@@ -145,7 +194,7 @@ func (c *Client) refreshSessionToken() error {
 	tmpClient := req.NewClient().
 		SetTimeout(30 * time.Second).
 		SetUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	
+
 	resp1, err := tmpClient.R().Get("https://www.google.com/")
 	extraCookies := ""
 	if err == nil {
@@ -161,7 +210,7 @@ func (c *Client) refreshSessionToken() error {
 	}
 
 	// 2. Prepare full cookie string
-	cookieStr := fmt.Sprintf("%s__Secure-1PSID=%s; __Secure-1PSIDTS=%s", 
+	cookieStr := fmt.Sprintf("%s__Secure-1PSID=%s; __Secure-1PSIDTS=%s",
 		extraCookies, c.cookies.Secure1PSID, c.cookies.Secure1PSIDTS)
 
 	commonHeaders := map[string]string{
@@ -244,7 +293,7 @@ func (c *Client) refreshSessionToken() error {
 	// Dump for debugging if it fails
 	// reqDump, _ := httputil.DumpRequestOut(req2, false)
 	// respDump, _ := httputil.DumpResponse(resp, false)
-	
+
 	var bodyReader io.ReadCloser = resp.Body
 	if strings.Contains(resp.Header.Get("Content-Encoding"), "gzip") {
 		gz, err := gzip.NewReader(resp.Body)
@@ -257,14 +306,12 @@ func (c *Client) refreshSessionToken() error {
 	bodyBytes, _ := io.ReadAll(bodyReader)
 	body := string(bodyBytes)
 
-
 	re := regexp.MustCompile(`"SNlM0e":"([^"]+)"`)
 	matches := re.FindStringSubmatch(body)
 	if len(matches) < 2 {
 		reFallback := regexp.MustCompile(`\["SNlM0e","([^"]+)"\]`)
 		matches = reFallback.FindStringSubmatch(body)
 		if len(matches) < 2 {
-
 
 			errMsg := "authentication failed: SNlM0e not found"
 			if strings.Contains(body, "Sign in") || strings.Contains(body, "login") {
@@ -277,10 +324,35 @@ func (c *Client) refreshSessionToken() error {
 		}
 	}
 
+	// Also extract build_label ("cfb2h") and session_id ("FdrFJe") for accurate routing
+	var buildLabel, sessionID string
+	if m := regexp.MustCompile(`"cfb2h":\s*"([^"]+)"`).FindStringSubmatch(body); len(m) == 2 {
+		buildLabel = m[1]
+	}
+	if m := regexp.MustCompile(`"FdrFJe":\s*"([^"]+)"`).FindStringSubmatch(body); len(m) == 2 {
+		sessionID = m[1]
+	}
+
 	c.mu.Lock()
 	c.at = matches[1]
+	c.buildLabel = buildLabel
+	c.sessionID = sessionID
 	c.healthy = true
 	c.mu.Unlock()
+
+	if buildLabel != "" {
+		c.log.Debug("Extracted build_label from init page", zap.String("build_label", buildLabel))
+	}
+
+	// When debug mode is enabled, dump the raw init body so the user can see which
+	// model identifiers Google actually embeds in the page (and what the correct strings are).
+	if c.debug {
+		snippet := body
+		if len(snippet) > 4000 {
+			snippet = snippet[:4000]
+		}
+		c.log.Info("🐛 [DEBUG] Gemini init body (first 4KB)", zap.String("body", snippet))
+	}
 
 	// Update dynamic models from the same initialization body
 	c.refreshModels(body)
@@ -289,20 +361,29 @@ func (c *Client) refreshSessionToken() error {
 }
 
 func (c *Client) refreshModels(body string) {
-	var newModels []ModelInfo
 	now := time.Now().Unix()
+	uniqueIDs := make(map[string]bool)
+	var newModels []ModelInfo
 
-	// Improved regex to find gemini model IDs even when escaped in JSON
-	// Matches IDs like gemini-2.0-flash, gemini-1.5-pro, etc.
-	// We look for gemini- followed by alphanumeric characters, dots, or dashes.
+	for id := range webModelSpecs {
+		uniqueIDs[id] = true
+		newModels = append(newModels, ModelInfo{
+			ID:       id,
+			Created:  now,
+			OwnedBy:  "google",
+			Provider: "gemini",
+		})
+	}
+
+	// Scrape the initialization body for model IDs currently exposed by Gemini Web.
+	// Matches IDs like gemini-2.0-flash, gemini-1.5-pro, gemini-3.0-flash, etc.
 	modelIDRegex := regexp.MustCompile(`gemini-[a-zA-Z0-9.-]+`)
 	matches := modelIDRegex.FindAllString(body, -1)
-	
-	uniqueIDs := make(map[string]bool)
+
 	for _, id := range matches {
 		// Clean up potential trailing backslashes or quotes if they were caught
 		id = strings.Trim(id, `\"' `)
-		
+
 		// Basic validation: ensure it doesn't look like a generic string or partial ID
 		if !uniqueIDs[id] && len(id) > 10 {
 			uniqueIDs[id] = true
@@ -318,16 +399,12 @@ func (c *Client) refreshModels(body string) {
 	c.mu.Lock()
 	c.cachedModels = newModels
 	c.mu.Unlock()
-	
-	if len(newModels) == 0 {
-		c.log.Warn("⚠️ No models found in Gemini Web response. Please check your cookies or connection.")
-	} else {
-		ids := make([]string, 0, len(newModels))
-		for _, m := range newModels {
-			ids = append(ids, m.ID)
-		}
-		c.log.Info("🔄 Refreshed available models from Gemini Web", zap.Int("count", len(newModels)), zap.Strings("models", ids))
+
+	ids := make([]string, 0, len(newModels))
+	for _, m := range newModels {
+		ids = append(ids, m.ID)
 	}
+	c.log.Info("🔄 Refreshed available models from Gemini Web", zap.Int("count", len(newModels)), zap.Strings("models", ids))
 }
 
 // startAutoRefresh periodically refreshes the PSIDTS cookie
@@ -407,7 +484,7 @@ func (c *Client) RotateCookies() error {
 	// Payload must be exactly this string
 	strBody := `[000,"-0000000000000000000"]`
 	req, _ := http.NewRequest("POST", EndpointRotateCookies, strings.NewReader(strBody))
-	
+
 	req.Header.Set("Content-Type", "application/json")
 	// Google often blocks requests with default Go-http-client User-Agent
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -453,7 +530,7 @@ func (c *Client) RotateCookies() error {
 func (c *Client) GetCookies() *CookieStore {
 	c.cookies.mu.RLock()
 	defer c.cookies.mu.RUnlock()
-	
+
 	return &CookieStore{
 		Secure1PSID:   c.cookies.Secure1PSID,
 		Secure1PSIDTS: c.cookies.Secure1PSIDTS,
@@ -474,42 +551,78 @@ func (c *Client) GenerateContent(ctx context.Context, prompt string, options ...
 			config.Model = c.cachedModels[0].ID
 		}
 	}
-	
-	// Strictly enforce that we only use models found/confirmed from the web
-	found := false
-	for _, m := range c.cachedModels {
-		if m.ID == config.Model {
-			found = true
-			break
-		}
-	}
-	at := c.at
-	c.mu.RUnlock()
 
-	if !found && config.Model != "" {
-		return nil, fmt.Errorf("model '%s' is not supported or not available. Available models: %v", config.Model, c.ListModelsIDs())
-	}
+	at := c.at
+	buildLabel := c.buildLabel
+	sessionID := c.sessionID
+	c.mu.RUnlock()
 
 	if at == "" {
 		return nil, errors.New("client not initialized")
 	}
 
-	// Build request payload
-	// The structure confirmed to work for model selection is [ [prompt], nil, nil, model ]
-	inner := []interface{}{
-		[]interface{}{prompt},
-		nil,
-		nil,
-		config.Model,
-	}
+	// Build the correct 69-element f.req inner array.
+	// Model selection happens via request headers, NOT via f.req.
+	// Structure reverse-engineered from HanaokaYuzu/Gemini-API project.
+	inner := make([]interface{}, 69)
+	inner[0] = []interface{}{prompt, 0, nil, nil, nil, nil, 0}             // message content
+	inner[1] = []interface{}{"en"}                                         // language
+	inner[2] = []interface{}{"", "", "", nil, nil, nil, nil, nil, nil, ""} // DEFAULT_METADATA (new conversation)
+	inner[6] = []interface{}{1}
+	inner[7] = 1 // STREAMING_FLAG_INDEX
+	inner[10] = 1
+	inner[11] = 0
+	inner[17] = []interface{}{[]interface{}{0}}
+	inner[18] = 0
+	inner[27] = 1
+	inner[30] = []interface{}{4}
+	inner[41] = []interface{}{1}
+	inner[53] = 0
+	uuidVal := newUpperUUID()
+	inner[59] = uuidVal
+	inner[61] = []interface{}{}
+	inner[68] = 2
 
 	innerJSON, _ := json.Marshal(inner)
-	outer := []interface{}{nil, string(innerJSON)}
-	outerJSON, _ := json.Marshal(outer)
+	outerJSON, _ := json.Marshal([]interface{}{nil, string(innerJSON)})
 
 	formData := map[string]string{
 		"at":    at,
 		"f.req": string(outerJSON),
+	}
+
+	// Build per-request headers; model is selected via x-goog-ext header.
+	reqHeaders := map[string]string{
+		"x-goog-ext-73010989-jspb":  "[0]",
+		"x-goog-ext-73010990-jspb":  "[0]",
+		"x-goog-ext-525005358-jspb": fmt.Sprintf(`["%s",1]`, uuidVal),
+	}
+	if spec, ok := webModelSpecs[config.Model]; ok {
+		reqHeaders["x-goog-ext-525001261-jspb"] = buildModelHeader(spec)
+	}
+
+	// Build query params including bl= (build_label) and f.sid= (session_id).
+	reqID := c.reqID.Add(100000)
+	queryParams := map[string]string{
+		"hl":     "en",
+		"rt":     "c",
+		"_reqid": fmt.Sprintf("%d", reqID),
+	}
+	if buildLabel != "" {
+		queryParams["bl"] = buildLabel
+	}
+	if sessionID != "" {
+		queryParams["f.sid"] = sessionID
+	}
+
+	if c.debug {
+		c.log.Info("🐛 [DEBUG] GenerateContent request",
+			zap.String("model", config.Model),
+			zap.String("endpoint", EndpointGenerate),
+			zap.String("f.req", string(outerJSON)),
+			zap.Any("headers", reqHeaders),
+			zap.Any("query_params", queryParams),
+		)
 	}
 
 	maxAttempts := c.maxRetries
@@ -538,11 +651,14 @@ func (c *Client) GenerateContent(ctx context.Context, prompt string, options ...
 		}
 
 		httpStart := time.Now()
-		resp, err := c.httpClient.R().
+		r := c.httpClient.R().
 			SetContext(ctx).
 			SetFormData(formData).
-			SetQueryParam("at", at).
-			Post(EndpointGenerate)
+			SetQueryParams(queryParams)
+		for k, v := range reqHeaders {
+			r = r.SetHeader(k, v)
+		}
+		resp, err := r.Post(EndpointGenerate)
 
 		httpDuration := time.Since(httpStart)
 		if err != nil {
@@ -568,8 +684,23 @@ func (c *Client) GenerateContent(ctx context.Context, prompt string, options ...
 			return nil, lastErr
 		}
 
+		raw := resp.String()
+
+		if c.debug {
+			// Write full response to a debug file (overwrite each time) so it can be
+			// inspected without log truncation.
+			debugFile := fmt.Sprintf("gemini_debug_response_%s.txt", strings.ReplaceAll(config.Model, "/", "_"))
+			_ = os.WriteFile(debugFile, []byte(raw), 0600)
+
+			c.log.Info("🐛 [DEBUG] GenerateContent raw response",
+				zap.String("requested_model", config.Model),
+				zap.Int("response_bytes", len(raw)),
+				zap.String("debug_file", debugFile),
+			)
+		}
+
 		parseStart := time.Now()
-		result, parseErr := c.parseResponse(resp.String())
+		result, parseErr := c.parseResponse(raw)
 		parseDuration := time.Since(parseStart)
 
 		if parseErr != nil {
@@ -645,18 +776,18 @@ func (c *Client) IsHealthy() bool {
 func (c *Client) ListModels() []ModelInfo {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	
+
 	if len(c.cachedModels) == 0 {
 		return []ModelInfo{}
 	}
-	
+
 	return c.cachedModels
 }
 
 func (c *Client) ListModelsIDs() []string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	
+
 	ids := make([]string, 0, len(c.cachedModels))
 	for _, m := range c.cachedModels {
 		ids = append(ids, m.ID)
@@ -674,7 +805,7 @@ func (c *Client) parseResponse(text string) (*Response, error) {
 		}
 		line = strings.TrimPrefix(line, ")]}'")
 
-		var root []interface{}
+		var root []any
 		if err := json.Unmarshal([]byte(line), &root); err == nil {
 			for _, item := range root {
 				itemArray, ok := item.([]interface{})
@@ -835,22 +966,22 @@ func (c *Client) ClearCookieCache() error {
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	
+
 	return nil
 }
 
 const (
-EndpointGoogle        = "https://www.google.com"
-EndpointInit          = "https://gemini.google.com/app"
-EndpointGenerate      = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
-EndpointRotateCookies = "https://accounts.google.com/RotateCookies"
-EndpointBatchExec     = "https://gemini.google.com/_/BardChatUi/data/batchexecute"
+	EndpointGoogle        = "https://www.google.com"
+	EndpointInit          = "https://gemini.google.com/app"
+	EndpointGenerate      = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
+	EndpointRotateCookies = "https://accounts.google.com/RotateCookies"
+	EndpointBatchExec     = "https://gemini.google.com/_/BardChatUi/data/batchexecute"
 )
 
 var DefaultHeaders = map[string]string{
-"Content-Type":  "application/x-www-form-urlencoded;charset=utf-8",
-"Origin":        "https://gemini.google.com",
-"Referer":       "https://gemini.google.com/",
-"User-Agent":    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-"X-Same-Domain": "1",
+	"Content-Type":  "application/x-www-form-urlencoded;charset=utf-8",
+	"Origin":        "https://gemini.google.com",
+	"Referer":       "https://gemini.google.com/",
+	"User-Agent":    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+	"X-Same-Domain": "1",
 }

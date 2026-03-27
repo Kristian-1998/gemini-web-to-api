@@ -49,16 +49,16 @@ type GenerationConfig struct {
 
 // GeminiGenerateResponse represents a Gemini generate response
 type GeminiGenerateResponse struct {
-	Candidates   []Candidate    `json:"candidates"`
+	Candidates    []Candidate    `json:"candidates"`
 	UsageMetadata *UsageMetadata `json:"usageMetadata,omitempty"`
 }
 
 // Candidate represents a candidate response
 type Candidate struct {
-	Index        int       `json:"index"`
-	Content      Content   `json:"content"`
-	FinishReason string    `json:"finishReason,omitempty"`
-	FinishMessage string   `json:"finishMessage,omitempty"`
+	Index         int     `json:"index"`
+	Content       Content `json:"content"`
+	FinishReason  string  `json:"finishReason,omitempty"`
+	FinishMessage string  `json:"finishMessage,omitempty"`
 }
 
 // UsageMetadata represents usage metadata

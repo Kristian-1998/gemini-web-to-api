@@ -125,7 +125,6 @@ func SendSSEEvent(w *bufio.Writer, log *zap.Logger, v interface{}) bool {
 	return true
 }
 
-
 // SplitResponseIntoChunks simulates streaming by splitting response into chunks
 func SplitResponseIntoChunks(text string, delayMs int) []string {
 	words := strings.Split(text, " ")

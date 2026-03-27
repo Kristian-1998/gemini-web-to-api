@@ -1,6 +1,95 @@
 version: "3"
 
 tasks:
+  setup-cookie-env:
+    desc: Create local venv and install browser-cookie3 (macOS/Linux/Windows)
+    vars:
+      system_python: '{{if eq OS "windows"}}python{{else}}python3{{end}}'
+      venv_python: '{{if eq OS "windows"}}.venv-cookie3/Scripts/python.exe{{else}}.venv-cookie3/bin/python{{end}}'
+    cmds:
+      - '{{.system_python}} -c "import os, venv; p=\".venv-cookie3\"; os.path.isdir(p) or venv.EnvBuilder(with_pip=True).create(p)"'
+      - '{{.venv_python}} -m pip install --upgrade pip browser-cookie3'
+
+  save-cookies:
+    desc: Fetch cookies from browser and write them to .env so the app picks them up automatically
+    deps: [setup-cookie-env]
+    vars:
+      browser: '{{default "chrome" .browser}}'
+      venv_python: '{{if eq OS "windows"}}.venv-cookie3/Scripts/python.exe{{else}}.venv-cookie3/bin/python{{end}}'
+    cmds:
+    - |
+      {{.venv_python}} - <<'PY'
+      import sys
+
+      import browser_cookie3
+
+      browser = "{{.browser}}"
+      domains = ["gemini.google.com", ".google.com"]
+      names = {"__Secure-1PSID": None, "__Secure-1PSIDTS": None}
+
+      loaders = {
+        "chrome": browser_cookie3.chrome,
+        "edge": browser_cookie3.edge,
+        "brave": browser_cookie3.brave,
+        "chromium": browser_cookie3.chromium,
+        "firefox": browser_cookie3.firefox,
+      }
+
+      if sys.platform == "darwin":
+        loaders["safari"] = browser_cookie3.safari
+
+      loader = loaders.get(browser)
+      if loader is None:
+        print("Invalid browser: {}".format(browser), file=sys.stderr)
+        sys.exit(1)
+
+      try:
+        jar = loader(domain_name="google.com")
+      except Exception as err:
+        print("Failed to load cookies from {}: {}".format(browser, err), file=sys.stderr)
+        sys.exit(1)
+
+      for cookie in jar:
+        if cookie.name in names and any(cookie.domain.endswith(d) for d in domains):
+          names[cookie.name] = cookie.value
+
+      psid = names["__Secure-1PSID"]
+      psidts = names["__Secure-1PSIDTS"]
+
+      if not psid or not psidts:
+        print("Could not find both __Secure-1PSID and __Secure-1PSIDTS.", file=sys.stderr)
+        print("Make sure you are logged into https://gemini.google.com in {}.".format(browser), file=sys.stderr)
+        sys.exit(1)
+
+      # Read existing .env (if any) and replace/add the two keys
+      env_file = ".env"
+      lines = []
+      try:
+        with open(env_file) as f:
+          lines = f.readlines()
+      except FileNotFoundError:
+        pass
+
+      keys_to_set = {"GEMINI_1PSID": psid, "GEMINI_1PSIDTS": psidts}
+      written = set()
+      new_lines = []
+      for line in lines:
+        key = line.split("=", 1)[0].strip()
+        if key in keys_to_set:
+          new_lines.append('{}={}\n'.format(key, keys_to_set[key]))
+          written.add(key)
+        else:
+          new_lines.append(line)
+      for key, val in keys_to_set.items():
+        if key not in written:
+          new_lines.append('{}={}\n'.format(key, val))
+
+      with open(env_file, "w") as f:
+        f.writelines(new_lines)
+
+      print("✅ Cookies written to .env (GEMINI_1PSID, GEMINI_1PSIDTS)")
+      PY
+
   swagger:
     desc: Generate swagger documentation
     cmds:
@@ -8,13 +97,8 @@ tasks:
 
   run:
     desc: Run the server with auto-swagger update
-    deps: [swagger]
-    cmds:
-      - go run cmd/server/main.go
-
-  dev:
-    desc: Run the server with auto-swagger update
-    deps: [swagger]
+    aliases: [dev]
+    deps: [save-cookies, swagger]
     cmds:
       - go run cmd/server/main.go
 

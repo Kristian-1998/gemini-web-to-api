@@ -9,9 +9,9 @@ import (
 )
 
 type Config struct {
-	Gemini GeminiConfig
-	Claude ClaudeConfig
-	OpenAI OpenAIConfig
+	Gemini    GeminiConfig
+	Claude    ClaudeConfig
+	OpenAI    OpenAIConfig
 	Server    ServerConfig
 	RateLimit RateLimitConfig
 	LogLevel  string
@@ -29,6 +29,7 @@ type GeminiConfig struct {
 	RefreshInterval int
 	MaxRetries      int
 	Cookies         string
+	Debug           bool
 }
 
 type ClaudeConfig struct {
@@ -44,7 +45,7 @@ type OpenAIConfig struct {
 }
 
 type ServerConfig struct {
-	Port     string
+	Port string
 }
 
 const (
@@ -62,7 +63,7 @@ func New() (*Config, error) {
 
 	// Server
 	cfg.Server.Port = getEnv("PORT", defaultServerPort)
-	
+
 	// General
 	cfg.LogLevel = getEnv("LOG_LEVEL", defaultLogLevel)
 
@@ -77,6 +78,7 @@ func New() (*Config, error) {
 	cfg.Gemini.Cookies = os.Getenv("GEMINI_COOKIES")
 	cfg.Gemini.RefreshInterval = getEnvInt("GEMINI_REFRESH_INTERVAL", defaultGeminiRefreshInterval)
 	cfg.Gemini.MaxRetries = getEnvInt("GEMINI_MAX_RETRIES", defaultGeminiMaxRetries)
+	cfg.Gemini.Debug = getEnvBool("GEMINI_DEBUG", false)
 
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {

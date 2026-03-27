@@ -9,7 +9,7 @@ import (
 
 func New(logLevel string) (*zap.Logger, error) {
 	var zapConfig zap.Config
-	
+
 	if os.Getenv("APP_ENV") == "production" {
 		zapConfig = zap.NewProductionConfig()
 		zapConfig.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
@@ -18,7 +18,7 @@ func New(logLevel string) (*zap.Logger, error) {
 		zapConfig.EncoderConfig.EncodeLevel = zapcore.LowercaseColorLevelEncoder
 		zapConfig.EncoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout("15:04:05")
 		zapConfig.EncoderConfig.EncodeCaller = zapcore.ShortCallerEncoder
-		zapConfig.EncoderConfig.ConsoleSeparator = "|" 
+		zapConfig.EncoderConfig.ConsoleSeparator = "|"
 		zapConfig.EncoderConfig.EncodeName = zapcore.FullNameEncoder
 	}
 

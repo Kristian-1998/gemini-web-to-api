@@ -131,5 +131,3 @@ type InteractionResponse struct {
 	// DurationMs total research duration in milliseconds
 	DurationMs int64 `json:"duration_ms,omitempty"`
 }
-
-

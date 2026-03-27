@@ -20,4 +20,3 @@ func RegisterRoutes(app *fiber.App, c *GeminiController) {
 	geminiV1 := geminiGroup.Group("/v1beta")
 	c.Register(geminiV1)
 }
-

@@ -423,8 +423,8 @@ func (c *Client) DeepResearchStream(ctx context.Context, query string, cb Progre
 	for i, q := range plan.SubQuestions {
 		pct := 10 + int(float64(i)/float64(total)*70)
 		if !emit(DeepResearchEvent{
-			Event:   EventTypeProgress,
-			Message: fmt.Sprintf("Researching [%d/%d]: %s", i+1, total, q),
+			Event:    EventTypeProgress,
+			Message:  fmt.Sprintf("Researching [%d/%d]: %s", i+1, total, q),
 			Progress: pct,
 		}) {
 			return nil

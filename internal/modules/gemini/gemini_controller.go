@@ -419,7 +419,6 @@ func (h *GeminiController) HandleInteractionCreate(c fiber.Ctx) error {
 	return c.Status(fiber.StatusAccepted).JSON(taskToDTO(task))
 }
 
-
 // HandleInteractionGet polls the status of a background research task.
 // @Summary Get Deep Research Interaction status
 // @Description Returns the current status and result of a background research task.
@@ -477,4 +476,3 @@ func (h *GeminiController) backgroundResearch(id string, req dto.DeepResearchReq
 		t.Result = result
 	})
 }
-

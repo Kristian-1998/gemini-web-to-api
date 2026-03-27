@@ -1,7 +1,9 @@
 package openai
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -91,7 +93,70 @@ func (h *OpenAIController) HandleChatCompletions(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(utils.ErrorToResponse(err, "api_error"))
 	}
 
+	if req.Stream {
+		return h.streamResponse(c, response)
+	}
+
 	return c.JSON(response)
+}
+
+func (h *OpenAIController) streamResponse(c fiber.Ctx, response *dto.ChatCompletionResponse) error {
+	c.Set(fiber.HeaderContentType, "text/event-stream")
+	c.Set(fiber.HeaderCacheControl, "no-cache")
+	c.Set("Connection", "keep-alive")
+	c.Set("X-Accel-Buffering", "no")
+
+	text := ""
+	if len(response.Choices) > 0 {
+		text = response.Choices[0].Message.Content
+	}
+
+	return c.SendStreamWriter(func(w *bufio.Writer) {
+		writeChunk := func(chunk dto.ChatCompletionChunk) {
+			data, err := json.Marshal(chunk)
+			if err != nil {
+				return
+			}
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			w.Flush()
+		}
+
+		// First chunk: establish role
+		writeChunk(dto.ChatCompletionChunk{
+			ID:      response.ID,
+			Object:  "chat.completion.chunk",
+			Created: response.Created,
+			Model:   response.Model,
+			Choices: []dto.ChunkChoice{
+				{Index: 0, Delta: models.Delta{Role: "assistant"}},
+			},
+		})
+
+		// Content chunk
+		writeChunk(dto.ChatCompletionChunk{
+			ID:      response.ID,
+			Object:  "chat.completion.chunk",
+			Created: response.Created,
+			Model:   response.Model,
+			Choices: []dto.ChunkChoice{
+				{Index: 0, Delta: models.Delta{Content: text}},
+			},
+		})
+
+		// Final chunk with finish_reason
+		writeChunk(dto.ChatCompletionChunk{
+			ID:      response.ID,
+			Object:  "chat.completion.chunk",
+			Created: response.Created,
+			Model:   response.Model,
+			Choices: []dto.ChunkChoice{
+				{Index: 0, Delta: models.Delta{}, FinishReason: "stop"},
+			},
+		})
+
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		w.Flush()
+	})
 }
 
 func (h *OpenAIController) convertToOpenAIFormat(response *providers.Response, model string) dto.ChatCompletionResponse {
