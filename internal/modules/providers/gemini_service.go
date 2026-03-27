@@ -796,8 +796,43 @@ func (c *Client) ListModelsIDs() []string {
 }
 
 // parseResponse parses Gemini's response format
+// extractCandidateText extracts the response text from a candidate array.
+// The Gemini streaming (69-element f.req) format places the full text in the
+// last array element as [[text], [[text,...]]], NOT at index 1 which is always
+// [""] in that format. The legacy chat format places text at index 1 directly.
+func extractCandidateText(candidate []interface{}) string {
+	// Legacy format: text at index 1 as [text_string]
+	if len(candidate) >= 2 {
+		if parts, ok := candidate[1].([]interface{}); ok && len(parts) > 0 {
+			if t, ok := parts[0].(string); ok && t != "" {
+				return t
+			}
+		}
+	}
+	// Streaming format: search from the end for [[text_string], [[text_string,...]]]
+	for i := len(candidate) - 1; i >= 2; i-- {
+		outer, ok := candidate[i].([]interface{})
+		if !ok || len(outer) == 0 {
+			continue
+		}
+		inner, ok := outer[0].([]interface{})
+		if !ok || len(inner) == 0 {
+			continue
+		}
+		if t, ok := inner[0].(string); ok && t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
 func (c *Client) parseResponse(text string) (*Response, error) {
 	lines := strings.Split(text, "\n")
+
+	// Collect the last non-empty result so streaming chunks don't cause early
+	// return on intermediate empty-text frames.
+	var bestResult *Response
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -823,43 +858,55 @@ func (c *Client) parseResponse(text string) (*Response, error) {
 					continue
 				}
 
-				if len(payload) > 4 {
-					candidates, ok := payload[4].([]interface{})
-					if ok && candidates != nil && len(candidates) > 0 {
-						firstCandidate, ok := candidates[0].([]interface{})
-						if ok && len(firstCandidate) >= 2 {
-							contentParts, ok := firstCandidate[1].([]interface{})
-							if ok && len(contentParts) > 0 {
-								resText, ok := contentParts[0].(string)
-								if ok {
-									// Extract conversation metadata if available
-									var cid, rid, rcid string
-									if len(firstCandidate) > 0 {
-										if id, ok := firstCandidate[0].(string); ok {
-											rcid = id
-										}
-									}
-									if len(payload) > 1 {
-										if id, ok := payload[1].(string); ok {
-											cid = id
-										}
-									}
+				if len(payload) <= 4 {
+					continue
+				}
 
-									return &Response{
-										Text: resText,
-										Metadata: map[string]any{
-											"cid":  cid,
-											"rid":  rid,
-											"rcid": rcid,
-										},
-									}, nil
-								}
-							}
-						}
+				candidates, ok := payload[4].([]interface{})
+				if !ok || len(candidates) == 0 {
+					continue
+				}
+
+				firstCandidate, ok := candidates[0].([]interface{})
+				if !ok || len(firstCandidate) < 2 {
+					continue
+				}
+
+				resText := extractCandidateText(firstCandidate)
+				if resText == "" {
+					continue
+				}
+
+				var rcid string
+				if id, ok := firstCandidate[0].(string); ok {
+					rcid = id
+				}
+
+				// payload[1] is ["cid", "rid"] in the streaming format
+				var cid, rid string
+				if arr, ok := payload[1].([]interface{}); ok && len(arr) >= 2 {
+					if id, ok := arr[0].(string); ok {
+						cid = id
 					}
+					if id, ok := arr[1].(string); ok {
+						rid = id
+					}
+				}
+
+				bestResult = &Response{
+					Text: resText,
+					Metadata: map[string]any{
+						"cid":  cid,
+						"rid":  rid,
+						"rcid": rcid,
+					},
 				}
 			}
 		}
+	}
+
+	if bestResult != nil {
+		return bestResult, nil
 	}
 
 	sample := text
