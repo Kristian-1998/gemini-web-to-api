@@ -5,13 +5,18 @@ tasks:
     desc: Create local venv and install browser-cookie3 (macOS/Linux/Windows)
     vars:
       system_python: '{{if eq OS "windows"}}python{{else}}python3{{end}}'
+      venv_dir: ".venv-cookie3"
+      venv_pip: '{{if eq OS "windows"}}.venv-cookie3/Scripts/pip.exe{{else}}.venv-cookie3/bin/pip{{end}}'
       venv_python: '{{if eq OS "windows"}}.venv-cookie3/Scripts/python.exe{{else}}.venv-cookie3/bin/python{{end}}'
     cmds:
-      - '{{.system_python}} -c "import os, venv; p=\".venv-cookie3\"; os.path.isdir(p) or venv.EnvBuilder(with_pip=True).create(p)"'
-      - '{{.venv_python}} -m pip install --upgrade pip browser-cookie3'
+      - '{{.system_python}} -m venv {{.venv_dir}}'
+      - '{{.venv_pip}} install --upgrade pip'
+      - '{{.venv_pip}} install browser-cookie3'
+    status:
+      - 'test -f {{.venv_python}}'
 
   save-cookies:
-    desc: Fetch cookies from browser and write them to .env so the app picks them up automatically
+    desc: Fetch cookies from browser and write them to .env securely
     deps: [setup-cookie-env]
     vars:
       browser: '{{default "chrome" .browser}}'
@@ -20,12 +25,12 @@ tasks:
     - |
       {{.venv_python}} - <<'PY'
       import sys
-
+      import os
       import browser_cookie3
 
       browser = "{{.browser}}"
       domains = ["gemini.google.com", ".google.com"]
-      names = {"__Secure-1PSID": None, "__Secure-1PSIDTS": None}
+      names = {"__Secure-1PSID": None, "__Secure-1PSIDTS": None, "__Secure-1PSIDCC": None}
 
       loaders = {
         "chrome": browser_cookie3.chrome,
@@ -55,6 +60,7 @@ tasks:
 
       psid = names["__Secure-1PSID"]
       psidts = names["__Secure-1PSIDTS"]
+      psidcc = names["__Secure-1PSIDCC"]
 
       if not psid or not psidts:
         print("Could not find both __Secure-1PSID and __Secure-1PSIDTS.", file=sys.stderr)
@@ -65,29 +71,33 @@ tasks:
       env_file = ".env"
       lines = []
       try:
-        with open(env_file) as f:
+        with open(env_file, "r") as f:
           lines = f.readlines()
       except FileNotFoundError:
         pass
 
       keys_to_set = {"GEMINI_1PSID": psid, "GEMINI_1PSIDTS": psidts}
+      if psidcc:
+          keys_to_set["GEMINI_1PSIDCC"] = psidcc
+
       written = set()
       new_lines = []
       for line in lines:
         key = line.split("=", 1)[0].strip()
         if key in keys_to_set:
-          new_lines.append('{}={}\n'.format(key, keys_to_set[key]))
+          new_lines.append('{}="{}"\n'.format(key, keys_to_set[key]))
           written.add(key)
         else:
           new_lines.append(line)
+          
       for key, val in keys_to_set.items():
         if key not in written:
-          new_lines.append('{}={}\n'.format(key, val))
+          new_lines.append('{}="{}"\n'.format(key, val))
 
       with open(env_file, "w") as f:
         f.writelines(new_lines)
 
-      print("✅ Cookies written to .env (GEMINI_1PSID, GEMINI_1PSIDTS)")
+      print("✅ Cookies safely written to: {}".format(os.path.abspath(env_file)))
       PY
 
   swagger:
