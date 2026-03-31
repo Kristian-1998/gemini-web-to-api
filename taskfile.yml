@@ -30,7 +30,7 @@ tasks:
 
       browser = "{{.browser}}"
       domains = ["gemini.google.com", ".google.com"]
-      names = {"__Secure-1PSID": None, "__Secure-1PSIDTS": None, "__Secure-1PSIDCC": None}
+      names = {"__Secure-1PSID": None, "__Secure-1PSIDTS": None}
 
       loaders = {
         "chrome": browser_cookie3.chrome,
@@ -60,7 +60,6 @@ tasks:
 
       psid = names["__Secure-1PSID"]
       psidts = names["__Secure-1PSIDTS"]
-      psidcc = names["__Secure-1PSIDCC"]
 
       if not psid or not psidts:
         print("Could not find both __Secure-1PSID and __Secure-1PSIDTS.", file=sys.stderr)
@@ -77,9 +76,7 @@ tasks:
         pass
 
       keys_to_set = {"GEMINI_1PSID": psid, "GEMINI_1PSIDTS": psidts}
-      if psidcc:
-          keys_to_set["GEMINI_1PSIDCC"] = psidcc
-
+    
       written = set()
       new_lines = []
       for line in lines:
